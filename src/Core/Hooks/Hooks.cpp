@@ -88,9 +88,34 @@ namespace Hooks
 			IDXGISwapChain1* swap1 = nullptr;
 			if (SUCCEEDED(swap->QueryInterface(__uuidof(IDXGISwapChain1), (void**)&swap1)))
 			{
+				CContext* ctx = CContext::GetContext();
+				CLogApi* logger = ctx->GetLogger();
+
 				LPVOID* vtbl1 = *(LPVOID**)swap1;
-				MH_CreateHook(Memory::FollowJmpChain((PBYTE)vtbl1[22]), (LPVOID)&Detour::DXGIPresent1, (LPVOID*)&Target::DXGIPresent1);
+				MH_STATUS status = MH_CreateHook(Memory::FollowJmpChain((PBYTE)vtbl1[22]), (LPVOID)&Detour::DXGIPresent1, (LPVOID*)&Target::DXGIPresent1);
+
+				if (logger)
+				{
+					if (status == MH_OK)
+					{
+						logger->Info(CH_CORE, "Successfully created Present1 hook (vtable[22]: %p)", vtbl1[22]);
+					}
+					else
+					{
+						logger->Warning(CH_CORE, "Failed to create Present1 hook! MH_STATUS: %d", status);
+					}
+				}
+
 				swap1->Release();
+			}
+			else
+			{
+				CContext* ctx = CContext::GetContext();
+				CLogApi* logger = ctx->GetLogger();
+				if (logger)
+				{
+					logger->Warning(CH_CORE, "Failed to QueryInterface for IDXGISwapChain1! Present1 hook not installed.");
+				}
 			}
 
 			MH_EnableHook(MH_ALL_HOOKS);
@@ -306,6 +331,22 @@ namespace Hooks
 
 		HRESULT __stdcall DXGIPresent1(IDXGISwapChain1* pChain, UINT SyncInterval, UINT PresentFlags, const DXGI_PRESENT_PARAMETERS* pPresentParameters)
 		{
+			// Log first call to verify this function is being used
+			static std::atomic<bool> s_FirstCall(true);
+			if (s_FirstCall.exchange(false))
+			{
+				// Emergency log before any initialization
+				CContext* tempCtx = CContext::GetContext();
+				if (tempCtx)
+				{
+					CLogApi* tempLogger = tempCtx->GetLogger();
+					if (tempLogger)
+					{
+						tempLogger->Critical(CH_CORE, "!!! DXGIPresent1 CALLED !!! Thread: %lu, SwapChain: %p", GetCurrentThreadId(), pChain);
+					}
+				}
+			}
+
 			// Thread-safe initialization for NVIDIA Smooth Motion / Frame Generation compatibility
 			static std::once_flag s_InitFlag;
 			static CContext*        s_Context       = nullptr;
