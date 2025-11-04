@@ -35,6 +35,7 @@ namespace Hooks
 	{
 		extern WNDPROC         WndProc;
 		extern DXPRESENT       DXGIPresent;
+		extern DXPRESENT1      DXGIPresent1;
 		extern DXRESIZEBUFFERS DXGIResizeBuffers;
 	}
 
@@ -53,6 +54,11 @@ namespace Hooks
 		/// (DETOUR) DXGIPresent
 		///----------------------------------------------------------------------------------------------------
 		HRESULT __stdcall DXGIPresent(IDXGISwapChain* pChain, UINT SyncInterval, UINT Flags);
+
+		///----------------------------------------------------------------------------------------------------
+		/// (DETOUR) DXGIPresent1
+		///----------------------------------------------------------------------------------------------------
+		HRESULT __stdcall DXGIPresent1(IDXGISwapChain1* pChain, UINT SyncInterval, UINT PresentFlags, const DXGI_PRESENT_PARAMETERS* pPresentParameters);
 
 		///----------------------------------------------------------------------------------------------------
 		/// (DETOUR) DXGIResizeBuffers
