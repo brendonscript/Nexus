@@ -8,6 +8,8 @@
 
 #include "Hooks.h"
 
+#include <mutex>
+
 #include "minhook/mh_hook.h"
 
 #include "Core/Context.h"
@@ -146,40 +148,82 @@ namespace Hooks
 
 		HRESULT __stdcall DXGIPresent(IDXGISwapChain* pChain, UINT SyncInterval, UINT Flags)
 		{
-			static CContext*        s_Context       = CContext::GetContext();
-			static RenderContext_t* s_RenderCtx     = s_Context->GetRendererCtx();
-			static CTextureLoader*  s_TextureLoader = s_Context->GetTextureService();
-			static CUiContext*      s_UIContext     = s_Context->GetUIContext();
+			// Thread-safe initialization for NVIDIA Smooth Motion / Frame Generation compatibility
+			// NVIDIA drivers can call Present from multiple threads when frame generation is enabled
+			static std::mutex s_InitMutex;
+			static bool s_Initialized = false;
+			static CContext*        s_Context       = nullptr;
+			static RenderContext_t* s_RenderCtx     = nullptr;
+			static CTextureLoader*  s_TextureLoader = nullptr;
+			static CUiContext*      s_UIContext     = nullptr;
+
+			// Initialize on first call with thread safety
+			if (!s_Initialized)
+			{
+				std::lock_guard<std::mutex> lock(s_InitMutex);
+				if (!s_Initialized) // Double-checked locking
+				{
+					s_Context       = CContext::GetContext();
+					if (s_Context)
+					{
+						s_RenderCtx     = s_Context->GetRendererCtx();
+						s_TextureLoader = s_Context->GetTextureService();
+						s_UIContext     = s_Context->GetUIContext();
+					}
+					s_Initialized = true;
+				}
+			}
+
+			// Validate critical pointers before proceeding
+			if (!s_RenderCtx || !s_TextureLoader || !s_UIContext)
+			{
+				// If initialization failed, just pass through to the original Present
+				return Target::DXGIPresent(pChain, SyncInterval, Flags);
+			}
 
 			/* The swap chain we used to hook is different than the one the game created.
-			 * To be precise, we should have no swapchain at all right now. */
+			 * To be precise, we should have no swapchain at all right now.
+			 * Protect this section with mutex for NVIDIA Frame Generation compatibility. */
 			if (s_RenderCtx->SwapChain != pChain)
 			{
-				s_RenderCtx->SwapChain = pChain;
+				std::lock_guard<std::mutex> lock(s_InitMutex);
 
-				if (s_RenderCtx->Device)
+				// Double-check after acquiring lock
+				if (s_RenderCtx->SwapChain != pChain)
 				{
-					s_RenderCtx->Device->Release();
-					s_RenderCtx->Device = nullptr;
+					s_RenderCtx->SwapChain = pChain;
+
+					if (s_RenderCtx->Device)
+					{
+						s_RenderCtx->Device->Release();
+						s_RenderCtx->Device = nullptr;
+					}
+
+					/* Sanity check. If we have a device, we should also have a context. */
+					if (s_RenderCtx->DeviceContext)
+					{
+						s_RenderCtx->DeviceContext->Release();
+						s_RenderCtx->DeviceContext = nullptr;
+					}
+
+					// Validate swap chain before calling methods
+					if (pChain)
+					{
+						HRESULT hr = s_RenderCtx->SwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&s_RenderCtx->Device);
+						if (SUCCEEDED(hr) && s_RenderCtx->Device)
+						{
+							s_RenderCtx->Device->GetImmediateContext(&s_RenderCtx->DeviceContext);
+
+							DXGI_SWAP_CHAIN_DESC swapChainDesc{};
+							s_RenderCtx->SwapChain->GetDesc(&swapChainDesc);
+
+							s_RenderCtx->Window.Handle = swapChainDesc.OutputWindow;
+							Target::WndProc = (WNDPROC)SetWindowLongPtr(s_RenderCtx->Window.Handle, GWLP_WNDPROC, (LONG_PTR)Detour::WndProc);
+
+							Loader::Initialize();
+						}
+					}
 				}
-
-				/* Sanity check. If we have a device, we should also have a context. */
-				if (s_RenderCtx->DeviceContext)
-				{
-					s_RenderCtx->DeviceContext->Release();
-					s_RenderCtx->DeviceContext = nullptr;
-				}
-
-				s_RenderCtx->SwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&s_RenderCtx->Device);
-				s_RenderCtx->Device->GetImmediateContext(&s_RenderCtx->DeviceContext);
-
-				DXGI_SWAP_CHAIN_DESC swapChainDesc{};
-				s_RenderCtx->SwapChain->GetDesc(&swapChainDesc);
-
-				s_RenderCtx->Window.Handle = swapChainDesc.OutputWindow;
-				Target::WndProc = (WNDPROC)SetWindowLongPtr(s_RenderCtx->Window.Handle, GWLP_WNDPROC, (LONG_PTR)Detour::WndProc);
-
-				Loader::Initialize();
 			}
 
 			Loader::ProcessQueue();
