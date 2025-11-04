@@ -14,14 +14,16 @@ IF %ERRORLEVEL% EQU 0 (
     )
     :wmic_done
 ) ELSE (
-    REM Fallback to PowerShell for newer Windows where WMIC is removed
-    FOR /F "tokens=1-6" %%A IN ('powershell -NoProfile -Command "$d=[DateTime]::UtcNow; Write-Output \"$($d.Year) $($d.Month) $($d.Day) $($d.Hour) $($d.Minute) $($d.Second)\""') DO (
+    REM Fallback to PowerShell - write to temp file to avoid parsing issues
+    powershell -NoProfile -Command "[DateTime]::UtcNow.ToString('yyyy M d H m')" > temp_date.txt
+    FOR /F "tokens=1-5" %%A IN (temp_date.txt) DO (
         SET _yyyy=%%A
         SET _mm=%%B
         SET _dd=%%C
         SET _hour=%%D
         SET _minute=%%E
     )
+    DEL temp_date.txt
 )
 
 REM Ensure variables are set (fallback to defaults if something went wrong)
@@ -31,11 +33,11 @@ IF NOT DEFINED _dd SET _dd=4
 IF NOT DEFINED _hour SET _hour=18
 IF NOT DEFINED _minute SET _minute=0
 
-ECHO #pragma once > src/Version.h
-ECHO #define V_MAJOR %_yyyy% >> src/Version.h
-ECHO #define V_MINOR %_mm% >> src/Version.h
-ECHO #define V_BUILD %_dd% >> src/Version.h
+ECHO #pragma once > src\Version.h
+ECHO #define V_MAJOR %_yyyy% >> src\Version.h
+ECHO #define V_MINOR %_mm% >> src\Version.h
+ECHO #define V_BUILD %_dd% >> src\Version.h
 SET /A var_res = %_hour% * 60 + %_minute%
-ECHO #define V_REVISION %var_res% >> src/Version.h
+ECHO #define V_REVISION %var_res% >> src\Version.h
 
 ECHO Generated Version.h: %_yyyy%.%_mm%.%_dd%.%var_res%
