@@ -565,9 +565,9 @@
     </Link>
     <PreBuildEvent>
       <Command>git submodule update --init --recursive
-CALL $(SolutionDir)Scripts\branch.bat
-CALL $(SolutionDir)Scripts\version.bat
-CALL $(SolutionDir)Scripts\remoteurl.bat</Command>
+CALL $(SolutionDir)generate_branch.bat
+CALL $(SolutionDir)generate_version.bat
+CALL $(SolutionDir)generate_remote.bat</Command>
     </PreBuildEvent>
     <PostBuildEvent>
       <Command>
@@ -603,9 +603,9 @@ CALL $(SolutionDir)Scripts\remoteurl.bat</Command>
     </Link>
     <PreBuildEvent>
       <Command>git submodule update --init --recursive
-CALL $(SolutionDir)Scripts\branch.bat
-CALL $(SolutionDir)Scripts\version.bat
-CALL $(SolutionDir)Scripts\remoteurl.bat</Command>
+CALL $(SolutionDir)generate_branch.bat
+CALL $(SolutionDir)generate_version.bat
+CALL $(SolutionDir)generate_remote.bat</Command>
     </PreBuildEvent>
     <PostBuildEvent>
       <Command>
