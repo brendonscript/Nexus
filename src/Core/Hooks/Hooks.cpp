@@ -149,48 +149,58 @@ namespace Hooks
 		HRESULT __stdcall DXGIPresent(IDXGISwapChain* pChain, UINT SyncInterval, UINT Flags)
 		{
 			// Thread-safe initialization for NVIDIA Smooth Motion / Frame Generation compatibility
-			// NVIDIA drivers can call Present from multiple threads when frame generation is enabled
-			static std::mutex s_InitMutex;
-			static bool s_Initialized = false;
+			static std::once_flag s_InitFlag;
 			static CContext*        s_Context       = nullptr;
 			static RenderContext_t* s_RenderCtx     = nullptr;
 			static CTextureLoader*  s_TextureLoader = nullptr;
 			static CUiContext*      s_UIContext     = nullptr;
+			static CLogApi*         s_Logger        = nullptr;
+			static bool             s_LoggedInit    = false;
 
-			// Initialize on first call with thread safety
-			if (!s_Initialized)
-			{
-				std::lock_guard<std::mutex> lock(s_InitMutex);
-				if (!s_Initialized) // Double-checked locking
+			// Initialize once using std::call_once for thread safety
+			std::call_once(s_InitFlag, []() {
+				s_Context = CContext::GetContext();
+				if (s_Context)
 				{
-					s_Context       = CContext::GetContext();
-					if (s_Context)
-					{
-						s_RenderCtx     = s_Context->GetRendererCtx();
-						s_TextureLoader = s_Context->GetTextureService();
-						s_UIContext     = s_Context->GetUIContext();
-					}
-					s_Initialized = true;
-				}
-			}
+					s_RenderCtx     = s_Context->GetRendererCtx();
+					s_TextureLoader = s_Context->GetTextureService();
+					s_UIContext     = s_Context->GetUIContext();
+					s_Logger        = s_Context->GetLogger();
 
-			// Validate critical pointers before proceeding
+					if (s_Logger)
+					{
+						s_Logger->Info(CH_CORE, "DXGIPresent: Initialized (Thread: %lu)", GetCurrentThreadId());
+					}
+					s_LoggedInit = true;
+				}
+			});
+
+			// If initialization failed, pass through without modification
 			if (!s_RenderCtx || !s_TextureLoader || !s_UIContext)
 			{
-				// If initialization failed, just pass through to the original Present
+				if (s_Logger && !s_LoggedInit)
+				{
+					s_Logger->Critical(CH_CORE, "DXGIPresent: Initialization failed! Contexts are null.");
+					s_LoggedInit = true;
+				}
 				return Target::DXGIPresent(pChain, SyncInterval, Flags);
 			}
 
 			/* The swap chain we used to hook is different than the one the game created.
-			 * To be precise, we should have no swapchain at all right now.
-			 * Protect this section with mutex for NVIDIA Frame Generation compatibility. */
+			 * NVIDIA Smooth Motion may present with the same swap chain from different threads,
+			 * so only initialize if swap chain actually changed, and don't block on it. */
 			if (s_RenderCtx->SwapChain != pChain)
 			{
-				std::lock_guard<std::mutex> lock(s_InitMutex);
-
-				// Double-check after acquiring lock
-				if (s_RenderCtx->SwapChain != pChain)
+				// Use atomic compare-exchange to avoid blocking NVIDIA's frame generation
+				IDXGISwapChain* expected = s_RenderCtx->SwapChain;
+				if (expected != pChain)
 				{
+					if (s_Logger)
+					{
+						s_Logger->Info(CH_CORE, "DXGIPresent: SwapChain changed %p -> %p (Thread: %lu)",
+							expected, pChain, GetCurrentThreadId());
+					}
+
 					s_RenderCtx->SwapChain = pChain;
 
 					if (s_RenderCtx->Device)
@@ -199,40 +209,64 @@ namespace Hooks
 						s_RenderCtx->Device = nullptr;
 					}
 
-					/* Sanity check. If we have a device, we should also have a context. */
 					if (s_RenderCtx->DeviceContext)
 					{
 						s_RenderCtx->DeviceContext->Release();
 						s_RenderCtx->DeviceContext = nullptr;
 					}
 
-					// Validate swap chain before calling methods
 					if (pChain)
 					{
-						HRESULT hr = s_RenderCtx->SwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&s_RenderCtx->Device);
+						HRESULT hr = pChain->GetDevice(__uuidof(ID3D11Device), (void**)&s_RenderCtx->Device);
 						if (SUCCEEDED(hr) && s_RenderCtx->Device)
 						{
 							s_RenderCtx->Device->GetImmediateContext(&s_RenderCtx->DeviceContext);
 
 							DXGI_SWAP_CHAIN_DESC swapChainDesc{};
-							s_RenderCtx->SwapChain->GetDesc(&swapChainDesc);
+							pChain->GetDesc(&swapChainDesc);
 
 							s_RenderCtx->Window.Handle = swapChainDesc.OutputWindow;
 							Target::WndProc = (WNDPROC)SetWindowLongPtr(s_RenderCtx->Window.Handle, GWLP_WNDPROC, (LONG_PTR)Detour::WndProc);
 
+							if (s_Logger)
+							{
+								s_Logger->Info(CH_CORE, "DXGIPresent: Device acquired successfully (Thread: %lu)", GetCurrentThreadId());
+							}
+
 							Loader::Initialize();
+						}
+						else
+						{
+							if (s_Logger)
+							{
+								s_Logger->Warning(CH_CORE, "DXGIPresent: Failed to get Device from SwapChain! HRESULT: 0x%08X (Thread: %lu)",
+									hr, GetCurrentThreadId());
+							}
 						}
 					}
 				}
 			}
 
-			Loader::ProcessQueue();
-
-			s_TextureLoader->Advance();
-
-			s_UIContext->Render();
-
-			s_RenderCtx->Metrics.FrameCount++;
+			// Only process queue, textures, and UI if we have a valid device
+			// NVIDIA frame generation may call this before device is ready
+			if (s_RenderCtx->Device && s_RenderCtx->DeviceContext)
+			{
+				Loader::ProcessQueue();
+				s_TextureLoader->Advance();
+				s_UIContext->Render();
+				s_RenderCtx->Metrics.FrameCount++;
+			}
+			else
+			{
+				// Log first few times we skip rendering due to invalid device
+				static int skipCount = 0;
+				if (skipCount < 5 && s_Logger)
+				{
+					s_Logger->Warning(CH_CORE, "DXGIPresent: Skipping render - Device: %p, DeviceContext: %p (Thread: %lu)",
+						s_RenderCtx->Device, s_RenderCtx->DeviceContext, GetCurrentThreadId());
+					skipCount++;
+				}
+			}
 
 			return Target::DXGIPresent(pChain, SyncInterval, Flags);
 		}
