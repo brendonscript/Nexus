@@ -8,6 +8,7 @@
 
 #include "Hooks.h"
 
+#include <atomic>
 #include <mutex>
 
 #include "minhook/mh_hook.h"
@@ -157,6 +158,12 @@ namespace Hooks
 			static CLogApi*         s_Logger        = nullptr;
 			static bool             s_LoggedInit    = false;
 
+			static std::atomic<uint64_t> s_FrameCounter(0);
+			static std::atomic<uint64_t> s_RenderCounter(0);
+			static std::atomic<uint64_t> s_SkipCounter(0);
+
+			// Track frame calls
+			uint64_t currentFrame = s_FrameCounter.fetch_add(1);
 			// Initialize once using std::call_once for thread safety
 			std::call_once(s_InitFlag, []() {
 				s_Context = CContext::GetContext();
@@ -184,6 +191,13 @@ namespace Hooks
 					s_LoggedInit = true;
 				}
 				return Target::DXGIPresent(pChain, SyncInterval, Flags);
+			}
+
+			// Log every 120 frames (~2 seconds at 60fps) to track activity
+			if (s_Logger && currentFrame % 120 == 0)
+			{
+				s_Logger->Info(CH_CORE, "DXGIPresent: Frame %llu (Thread: %lu, Rendered: %llu, Skipped: %llu)",
+					currentFrame, GetCurrentThreadId(), s_RenderCounter.load(), s_SkipCounter.load());
 			}
 
 			/* The swap chain we used to hook is different than the one the game created.
@@ -221,6 +235,12 @@ namespace Hooks
 						if (SUCCEEDED(hr) && s_RenderCtx->Device)
 						{
 							s_RenderCtx->Device->GetImmediateContext(&s_RenderCtx->DeviceContext);
+							
+							if (s_Logger)
+							{
+								s_Logger->Info(CH_CORE, "DXGIPresent: Device: %p, DeviceContext: %p (Thread: %lu)",
+									s_RenderCtx->Device, s_RenderCtx->DeviceContext, GetCurrentThreadId());
+							}
 
 							DXGI_SWAP_CHAIN_DESC swapChainDesc{};
 							pChain->GetDesc(&swapChainDesc);
@@ -255,11 +275,13 @@ namespace Hooks
 				s_TextureLoader->Advance();
 				s_UIContext->Render();
 				s_RenderCtx->Metrics.FrameCount++;
+				s_RenderCounter.fetch_add(1);
 			}
 			else
 			{
 				// Log first few times we skip rendering due to invalid device
 				static int skipCount = 0;
+				s_SkipCounter.fetch_add(1);
 				if (skipCount < 5 && s_Logger)
 				{
 					s_Logger->Warning(CH_CORE, "DXGIPresent: Skipping render - Device: %p, DeviceContext: %p (Thread: %lu)",
