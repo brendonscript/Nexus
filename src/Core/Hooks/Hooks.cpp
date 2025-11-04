@@ -92,17 +92,17 @@ namespace Hooks
 				CLogApi* logger = ctx->GetLogger();
 
 				LPVOID* vtbl1 = *(LPVOID**)swap1;
-				MH_STATUS status = MH_CreateHook(Memory::FollowJmpChain((PBYTE)vtbl1[22]), (LPVOID)&Detour::DXGIPresent1, (LPVOID*)&Target::DXGIPresent1);
+				EMHStatus status = MH_CreateHook(Memory::FollowJmpChain((PBYTE)vtbl1[22]), (LPVOID)&Detour::DXGIPresent1, (LPVOID*)&Target::DXGIPresent1);
 
 				if (logger)
 				{
-					if (status == MH_OK)
+					if (status == EMHStatus::MH_OK)
 					{
 						logger->Info(CH_CORE, "Successfully created Present1 hook (vtable[22]: %p)", vtbl1[22]);
 					}
 					else
 					{
-						logger->Warning(CH_CORE, "Failed to create Present1 hook! MH_STATUS: %d", status);
+						logger->Warning(CH_CORE, "Failed to create Present1 hook! EMHStatus: %d", static_cast<int>(status));
 					}
 				}
 
