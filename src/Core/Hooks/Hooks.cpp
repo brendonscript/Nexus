@@ -83,6 +83,16 @@ namespace Hooks
 			/* Follow the jump chain to work nicely with various other hooks. */
 			MH_CreateHook(Memory::FollowJmpChain((PBYTE)vtbl[8]),  (LPVOID)&Detour::DXGIPresent,       (LPVOID*)&Target::DXGIPresent      );
 			MH_CreateHook(Memory::FollowJmpChain((PBYTE)vtbl[13]), (LPVOID)&Detour::DXGIResizeBuffers, (LPVOID*)&Target::DXGIResizeBuffers);
+
+			/* Try to hook Present1 for IDXGISwapChain1 (NVIDIA Smooth Motion compatibility) */
+			IDXGISwapChain1* swap1 = nullptr;
+			if (SUCCEEDED(swap->QueryInterface(__uuidof(IDXGISwapChain1), (void**)&swap1)))
+			{
+				LPVOID* vtbl1 = *(LPVOID**)swap1;
+				MH_CreateHook(Memory::FollowJmpChain((PBYTE)vtbl1[22]), (LPVOID)&Detour::DXGIPresent1, (LPVOID*)&Target::DXGIPresent1);
+				swap1->Release();
+			}
+
 			MH_EnableHook(MH_ALL_HOOKS);
 
 			/* Release the temporary interfaces. */
@@ -106,6 +116,7 @@ namespace Hooks
 	{
 		WNDPROC         WndProc           = nullptr;
 		DXPRESENT       DXGIPresent       = nullptr;
+		DXPRESENT1      DXGIPresent1      = nullptr;
 		DXRESIZEBUFFERS DXGIResizeBuffers = nullptr;
 	}
 
@@ -291,6 +302,152 @@ namespace Hooks
 			}
 
 			return Target::DXGIPresent(pChain, SyncInterval, Flags);
+		}
+
+		HRESULT __stdcall DXGIPresent1(IDXGISwapChain1* pChain, UINT SyncInterval, UINT PresentFlags, const DXGI_PRESENT_PARAMETERS* pPresentParameters)
+		{
+			// Thread-safe initialization for NVIDIA Smooth Motion / Frame Generation compatibility
+			static std::once_flag s_InitFlag;
+			static CContext*        s_Context       = nullptr;
+			static RenderContext_t* s_RenderCtx     = nullptr;
+			static CTextureLoader*  s_TextureLoader = nullptr;
+			static CUiContext*      s_UIContext     = nullptr;
+			static CLogApi*         s_Logger        = nullptr;
+			static bool             s_LoggedInit    = false;
+			static std::atomic<uint64_t> s_FrameCounter(0);
+			static std::atomic<uint64_t> s_RenderCounter(0);
+			static std::atomic<uint64_t> s_SkipCounter(0);
+
+			// Track frame calls
+			uint64_t currentFrame = s_FrameCounter.fetch_add(1);
+
+			// Initialize once using std::call_once for thread safety
+			std::call_once(s_InitFlag, []() {
+				s_Context = CContext::GetContext();
+				if (s_Context)
+				{
+					s_RenderCtx     = s_Context->GetRendererCtx();
+					s_TextureLoader = s_Context->GetTextureService();
+					s_UIContext     = s_Context->GetUIContext();
+					s_Logger        = s_Context->GetLogger();
+
+					if (s_Logger)
+					{
+						s_Logger->Info(CH_CORE, "DXGIPresent1: Initialized (Thread: %lu)", GetCurrentThreadId());
+					}
+					s_LoggedInit = true;
+				}
+			});
+
+			// If initialization failed, pass through without modification
+			if (!s_RenderCtx || !s_TextureLoader || !s_UIContext)
+			{
+				if (s_Logger && !s_LoggedInit)
+				{
+					s_Logger->Critical(CH_CORE, "DXGIPresent1: Initialization failed! Contexts are null.");
+					s_LoggedInit = true;
+				}
+				return Target::DXGIPresent1(pChain, SyncInterval, PresentFlags, pPresentParameters);
+			}
+
+			// Log every 120 frames (~2 seconds at 60fps) to track activity
+			if (s_Logger && currentFrame % 120 == 0)
+			{
+				s_Logger->Info(CH_CORE, "DXGIPresent1: Frame %llu (Thread: %lu, Rendered: %llu, Skipped: %llu)",
+					currentFrame, GetCurrentThreadId(), s_RenderCounter.load(), s_SkipCounter.load());
+			}
+
+			/* The swap chain we used to hook is different than the one the game created.
+			 * NVIDIA Smooth Motion may present with the same swap chain from different threads,
+			 * so only initialize if swap chain actually changed, and don't block on it. */
+			if (s_RenderCtx->SwapChain != (IDXGISwapChain*)pChain)
+			{
+				// Use atomic compare-exchange to avoid blocking NVIDIA's frame generation
+				IDXGISwapChain* expected = s_RenderCtx->SwapChain;
+				if (expected != (IDXGISwapChain*)pChain)
+				{
+					if (s_Logger)
+					{
+						s_Logger->Info(CH_CORE, "DXGIPresent1: SwapChain changed %p -> %p (Thread: %lu)",
+							expected, pChain, GetCurrentThreadId());
+					}
+
+					s_RenderCtx->SwapChain = (IDXGISwapChain*)pChain;
+
+					if (s_RenderCtx->Device)
+					{
+						s_RenderCtx->Device->Release();
+						s_RenderCtx->Device = nullptr;
+					}
+
+					if (s_RenderCtx->DeviceContext)
+					{
+						s_RenderCtx->DeviceContext->Release();
+						s_RenderCtx->DeviceContext = nullptr;
+					}
+
+					if (pChain)
+					{
+						HRESULT hr = pChain->GetDevice(__uuidof(ID3D11Device), (void**)&s_RenderCtx->Device);
+						if (SUCCEEDED(hr) && s_RenderCtx->Device)
+						{
+							s_RenderCtx->Device->GetImmediateContext(&s_RenderCtx->DeviceContext);
+
+							if (s_Logger)
+							{
+								s_Logger->Info(CH_CORE, "DXGIPresent1: Device: %p, DeviceContext: %p (Thread: %lu)",
+									s_RenderCtx->Device, s_RenderCtx->DeviceContext, GetCurrentThreadId());
+							}
+
+							DXGI_SWAP_CHAIN_DESC swapChainDesc{};
+							((IDXGISwapChain*)pChain)->GetDesc(&swapChainDesc);
+
+							s_RenderCtx->Window.Handle = swapChainDesc.OutputWindow;
+							Target::WndProc = (WNDPROC)SetWindowLongPtr(s_RenderCtx->Window.Handle, GWLP_WNDPROC, (LONG_PTR)Detour::WndProc);
+
+							if (s_Logger)
+							{
+								s_Logger->Info(CH_CORE, "DXGIPresent1: Device acquired successfully (Thread: %lu)", GetCurrentThreadId());
+							}
+
+							Loader::Initialize();
+						}
+						else
+						{
+							if (s_Logger)
+							{
+								s_Logger->Warning(CH_CORE, "DXGIPresent1: Failed to get Device from SwapChain! HRESULT: 0x%08X (Thread: %lu)",
+									hr, GetCurrentThreadId());
+							}
+						}
+					}
+				}
+			}
+
+			// Only process queue, textures, and UI if we have a valid device
+			// NVIDIA frame generation may call this before device is ready
+			if (s_RenderCtx->Device && s_RenderCtx->DeviceContext)
+			{
+				Loader::ProcessQueue();
+				s_TextureLoader->Advance();
+				s_UIContext->Render();
+				s_RenderCtx->Metrics.FrameCount++;
+				s_RenderCounter.fetch_add(1);
+			}
+			else
+			{
+				s_SkipCounter.fetch_add(1);
+				// Log first few times we skip rendering due to invalid device
+				static int skipCount = 0;
+				if (skipCount < 5 && s_Logger)
+				{
+					s_Logger->Warning(CH_CORE, "DXGIPresent1: Skipping render - Device: %p, DeviceContext: %p (Thread: %lu)",
+						s_RenderCtx->Device, s_RenderCtx->DeviceContext, GetCurrentThreadId());
+					skipCount++;
+				}
+			}
+
+			return Target::DXGIPresent1(pChain, SyncInterval, PresentFlags, pPresentParameters);
 		}
 
 		HRESULT __stdcall DXGIResizeBuffers(IDXGISwapChain* pChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags)
