@@ -564,10 +564,7 @@
       <AdditionalDependencies>advapi32.lib;crypt32.lib;gdi32.lib;ntdll.lib;PathCch.lib;Psapi.lib;shcore.lib;Shell32.lib;Shlwapi.lib;user32.lib;ws2_32.lib;libssl64MTd.lib;libcrypto64MTd.lib</AdditionalDependencies>
     </Link>
     <PreBuildEvent>
-      <Command>git submodule update --init --recursive
-CALL $(SolutionDir)Scripts\branch.bat
-CALL $(SolutionDir)Scripts\version.bat
-CALL $(SolutionDir)Scripts\remoteurl.bat</Command>
+      <Command>git submodule update --init --recursive</Command>
     </PreBuildEvent>
     <PostBuildEvent>
       <Command>
@@ -602,10 +599,7 @@ CALL $(SolutionDir)Scripts\remoteurl.bat</Command>
       <AdditionalDependencies>advapi32.lib;crypt32.lib;gdi32.lib;ntdll.lib;PathCch.lib;Psapi.lib;shcore.lib;Shell32.lib;Shlwapi.lib;user32.lib;ws2_32.lib;libssl64MT.lib;libcrypto64MT.lib</AdditionalDependencies>
     </Link>
     <PreBuildEvent>
-      <Command>git submodule update --init --recursive
-CALL $(SolutionDir)Scripts\branch.bat
-CALL $(SolutionDir)Scripts\version.bat
-CALL $(SolutionDir)Scripts\remoteurl.bat</Command>
+      <Command>git submodule update --init --recursive</Command>
     </PreBuildEvent>
     <PostBuildEvent>
       <Command>
